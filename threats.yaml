@@ -195,6 +195,64 @@ threats:
     residualRisk: Misconfigured allowlists, social engineering to get added
     recommendations: Default-deny channel access, audit logging of new senders
 
+  - id: T-ACCESS-007
+    name: Gateway Config Credential Leakage
+    tactic: Initial Access
+    atlas: AML.T0040
+    risk: Critical
+    category: access
+    description: config.get WebSocket method returns all channel credentials (Telegram bot tokens, Discord tokens, Slack signing secrets, model provider API keys) in plaintext to any connected client
+    attackVector: Any WebSocket client (Control UI, browser extension, or client exploiting CVE-2026-25253) retrieves full credential set via config.get
+    affected: Gateway WebSocket API, all channel integrations, model provider keys
+    mitigations: "FIXED: Credential redaction layer sanitizes config snapshot before transmission (PR #9858, +669 lines, 15 test cases). Covers 10+ channel types and all model provider keys."
+    residualRisk: None for this specific vector after fix
+    recommendations: Audit any new config fields for credential patterns to ensure redaction coverage
+    references:
+      - "https://github.com/openclaw/openclaw/pull/9858"
+
+  - id: T-ACCESS-008
+    name: Timing Side-Channel in Hook Token Auth
+    tactic: Initial Access
+    atlas: AML.T0040
+    risk: Medium
+    category: access
+    description: Hook token authentication used JavaScript !== (byte-length-dependent timing) while gateway auth correctly used crypto.timingSafeEqual, allowing timing side-channel extraction of token values
+    attackVector: Remote attacker measures HTTP response times across many requests to extract hook token value byte-by-byte
+    affected: src/gateway/server-http.ts, hook authentication
+    mitigations: "FIXED: Maintainers created shared safeEqualSecret module now used across the entire gateway (PR #10527)"
+    residualRisk: None for this specific vector after fix
+    recommendations: Audit all future secret comparison paths to use safeEqualSecret
+    references:
+      - "https://github.com/openclaw/openclaw/pull/10527"
+
+  - id: T-ACCESS-009
+    name: World-Readable WhatsApp Session Credentials
+    tactic: Initial Access
+    atlas: AML.T0040
+    risk: Medium
+    category: access
+    description: WhatsApp Web session credentials (creds.json) written with default umask (0644), readable by any local user on multi-user systems or shared hosts
+    attackVector: Any process on the system reads WhatsApp session tokens from creds.json due to permissive file permissions
+    affected: src/web/auth-store.ts, WhatsApp session files
+    mitigations: "FIXED: chmodSync(path, 0o600) added to all three credential write paths (PR #10529)"
+    residualRisk: None for this specific vector after fix
+    recommendations: Audit all credential file write paths for consistent 0o600 enforcement
+    references:
+      - "https://github.com/openclaw/openclaw/pull/10529"
+
+  - id: T-ACCESS-010
+    name: SSRF via OpenResponses API
+    tactic: Initial Access
+    atlas: AML.T0040
+    risk: High
+    category: access
+    description: input_image and input_file handlers in OpenResponses API fetch arbitrary URLs with allowUrl true by default, with no SSRF protection unlike the media fetch path which uses fetchWithSsrfGuard
+    attackVector: Attacker submits crafted input_image or input_file URLs targeting cloud metadata endpoints (169.254.169.254), internal services, or private IPs
+    affected: src/gateway/openresponses-http.ts
+    mitigations: None at this layer. The media fetch path has fetchWithSsrfGuard but OpenResponses does not.
+    residualRisk: Cloud metadata theft, internal network probing, port scanning via SSRF
+    recommendations: Apply existing fetchWithSsrfGuard to OpenResponses URL fetch handlers
+
   # ── Execution (AML.TA0005) ─────────────────────────────────
   - id: T-EXEC-001
     name: Direct Prompt Injection
@@ -273,6 +331,52 @@ threats:
     mitigations: Tool policy enforcement
     residualRisk: MCP servers may have broad permissions
     recommendations: MCP server allowlisting, argument validation, least-privilege MCP configs
+
+  - id: T-EXEC-007
+    name: A2UI Path Traversal via TOCTOU
+    tactic: Execution
+    atlas: AML.T0043
+    risk: Medium
+    category: execution
+    description: A2UI file serving handler used custom path resolution with lstat check followed by separate readFile, creating a TOCTOU (time-of-check-time-of-use) gap where a symlink or file replacement between check and read redirects to attacker-controlled content
+    attackVector: Attacker races between lstat security check and file read to substitute a symbolic link or replacement file pointing to sensitive paths
+    affected: src/canvas-host/a2ui.ts
+    mitigations: "FIXED: Replaced with openFileWithinRoot from src/infra/fs-safe.ts which uses O_NOFOLLOW and inode verification (PR #10525). Canvas host server.ts already used openFileWithinRoot correctly."
+    residualRisk: None for this specific vector after fix
+    recommendations: Audit all file serving paths to use openFileWithinRoot consistently
+    references:
+      - "https://github.com/openclaw/openclaw/pull/10525"
+
+  - id: T-EXEC-008
+    name: npm Lifecycle Script Execution During Plugin Install
+    tactic: Execution
+    atlas: AML.T0010.001
+    risk: Critical
+    category: execution
+    description: Plugin and hook pack installation ran npm install without --ignore-scripts, allowing malicious preinstall/postinstall scripts to execute arbitrary code. This was the primary installation vector in the ClawHavoc campaign (341 malicious skills distributing Atomic Stealer).
+    attackVector: Malicious npm package includes preinstall or postinstall script that executes credential theft malware, reverse shells, or crypto miners during npm install
+    affected: src/plugins/install.ts, hook pack installation
+    mitigations: "FIXED: --ignore-scripts added to all extension install paths via shared installPackageDir utility (PR #10528)"
+    residualRisk: Plugins that legitimately require postinstall scripts may need manual handling
+    recommendations: Document the --ignore-scripts behavior for plugin authors, provide escape hatch for verified publishers only
+    references:
+      - "https://github.com/openclaw/openclaw/pull/10528"
+      - "https://thehackernews.com/2026/02/researchers-find-341-malicious-clawhub.html"
+
+  - id: T-EXEC-009
+    name: No Static Analysis for Skill Code
+    tactic: Execution
+    atlas: AML.T0010.001
+    risk: High
+    category: execution
+    description: Skills were installed and executed without any static analysis of their code content. The existing moderation system only checked metadata fields (slug, displayName, summary) using simple regex patterns, not actual executable code.
+    attackVector: Skill contains command injection, dynamic eval, data exfiltration, obfuscated payloads, or crypto mining code that passes moderation because code content is not analyzed
+    affected: Skill installation flow, ClawHub moderation
+    mitigations: "FIXED: Zero-dependency code safety scanner with 19 detection rules integrated into plugin install flow (pre-install warnings) and security audit --deep command (PR #9806, +1,721 lines). Cherry-picked by 10+ downstream forks."
+    residualRisk: Detection is pattern-based and can be bypassed with novel obfuscation techniques
+    recommendations: Complement static analysis with behavioral analysis (VirusTotal Code Insight), AST-based detection for deeper coverage
+    references:
+      - "https://github.com/openclaw/openclaw/pull/9806"
 
   # ── Persistence (AML.TA0006) ───────────────────────────────
   - id: T-PERSIST-001
@@ -552,6 +656,19 @@ threats:
     residualRisk: Approved destructive commands may be disguised
     recommendations: Destructive command confirmation, backup recommendations, undo capability
 
+  - id: T-IMPACT-006
+    name: Gateway Denial of Service via Missing Rate Limiting
+    tactic: Impact
+    atlas: AML.T0031
+    risk: High
+    category: impact
+    description: No rate limiting implementation exists anywhere in the gateway. Searches for rateLimit, throttle, limiter in the codebase return no results. Brute-force authentication, WebSocket connection floods, and API quota exhaustion are all unmitigated.
+    attackVector: Automated brute-force against gateway auth tokens, WebSocket connection flooding, repeated expensive API calls
+    affected: Gateway-wide (all HTTP and WebSocket endpoints)
+    mitigations: None
+    residualRisk: Full gateway denial of service, brute-force token extraction, API cost exhaustion
+    recommendations: Implement per-IP and per-sender rate limiting on auth endpoints, WebSocket connections, and API calls. Add circuit breakers for API provider cost protection.
+
   - id: T-IMPACT-005
     name: Financial Fraud via Agent
     tactic: Impact
@@ -589,6 +706,18 @@ attack_chains:
   - name: Financial Fraud Chain
     steps: [T-ACCESS-006, T-EXEC-001, T-DISC-001, T-IMPACT-005]
     description: "Gain channel access \u2192 Inject prompts \u2192 Enumerate financial tools \u2192 Execute fraud"
+
+  - name: CVE-2026-25253 to Full Credential Theft
+    steps: [T-ACCESS-007, T-EXFIL-003]
+    description: "Exploit WebSocket hijack (CVE-2026-25253) \u2192 Call config.get \u2192 Receive all channel credentials in plaintext. MITIGATED by PR #9858 (credential redaction layer)."
+
+  - name: ClawHavoc Lifecycle Script Attack
+    steps: [T-RECON-003, T-ACCESS-004, T-EXEC-008, T-EXFIL-003]
+    description: "Identify target skills on ClawHub \u2192 Publish malicious skill with npm lifecycle scripts \u2192 preinstall/postinstall executes Atomic Stealer \u2192 Harvest credentials. MITIGATED by PR #10528 (--ignore-scripts)."
+
+  - name: SSRF to Cloud Metadata Theft
+    steps: [T-ACCESS-010, T-DISC-004, T-EXFIL-001]
+    description: "Submit crafted input_image URL targeting 169.254.169.254 via OpenResponses API \u2192 Read cloud instance metadata (IAM tokens, service account keys) \u2192 Exfiltrate via response. UNMITIGATED."
 
 trust_boundaries:
   # Order follows actual user/data flow:
@@ -799,6 +928,54 @@ risk_matrix:
     impact: High
     risk_level: Medium
     priority: P2
+  - threat: T-ACCESS-007
+    likelihood: High
+    impact: Critical
+    risk_level: Critical
+    priority: P0
+    notes: "FIXED via PR #9858"
+  - threat: T-EXEC-008
+    likelihood: High
+    impact: Critical
+    risk_level: Critical
+    priority: P0
+    notes: "FIXED via PR #10528"
+  - threat: T-EXEC-009
+    likelihood: High
+    impact: High
+    risk_level: High
+    priority: P1
+    notes: "FIXED via PR #9806"
+  - threat: T-ACCESS-010
+    likelihood: Medium
+    impact: High
+    risk_level: High
+    priority: P1
+    notes: "UNFIXED - fetchWithSsrfGuard not applied to OpenResponses path"
+  - threat: T-IMPACT-006
+    likelihood: High
+    impact: High
+    risk_level: High
+    priority: P1
+    notes: "UNFIXED - no rate limiting in codebase"
+  - threat: T-ACCESS-008
+    likelihood: Low
+    impact: Medium
+    risk_level: Medium
+    priority: P2
+    notes: "FIXED via PR #10527"
+  - threat: T-ACCESS-009
+    likelihood: Medium
+    impact: Medium
+    risk_level: Medium
+    priority: P2
+    notes: "FIXED via PR #10529"
+  - threat: T-EXEC-007
+    likelihood: Low
+    impact: Medium
+    risk_level: Medium
+    priority: P2
+    notes: "FIXED via PR #10525"
 
 recommendations:
   immediate_p0:
@@ -814,10 +991,10 @@ recommendations:
 
   short_term_p1:
     - id: R-004
-      recommendation: Implement rate limiting
-      addresses: [T-IMPACT-002]
+      recommendation: Implement rate limiting on gateway auth, WebSocket connections, and API endpoints
+      addresses: [T-IMPACT-002, T-IMPACT-006]
     - id: R-005
-      recommendation: Add token encryption at rest
+      recommendation: Add token encryption at rest (extend macOS keychain integration to auth-profiles store)
       addresses: [T-ACCESS-003]
     - id: R-006
       recommendation: Improve exec approval UX and validation
@@ -825,6 +1002,9 @@ recommendations:
     - id: R-007
       recommendation: Implement URL allowlisting for web_fetch
       addresses: [T-EXFIL-001]
+    - id: R-011
+      recommendation: Apply fetchWithSsrfGuard to OpenResponses input_image and input_file handlers
+      addresses: [T-ACCESS-010]
 
   medium_term_p2:
     - id: R-008
@@ -837,6 +1017,38 @@ recommendations:
       recommendation: Add update signing and version pinning
       addresses: [T-PERSIST-002]
 
+  recently_fixed:
+    - id: R-F01
+      recommendation: "Credential redaction for config.get WebSocket responses"
+      addresses: [T-ACCESS-007]
+      status: "FIXED (PR #9858)"
+      pr: "https://github.com/openclaw/openclaw/pull/9858"
+    - id: R-F02
+      recommendation: "Code safety scanner for skills/plugins (19 detection rules)"
+      addresses: [T-EXEC-009]
+      status: "FIXED (PR #9806)"
+      pr: "https://github.com/openclaw/openclaw/pull/9806"
+    - id: R-F03
+      recommendation: "openFileWithinRoot for A2UI file serving (TOCTOU fix)"
+      addresses: [T-EXEC-007]
+      status: "FIXED (PR #10525)"
+      pr: "https://github.com/openclaw/openclaw/pull/10525"
+    - id: R-F04
+      recommendation: "Timing-safe comparison for hook token authentication"
+      addresses: [T-ACCESS-008]
+      status: "FIXED (PR #10527)"
+      pr: "https://github.com/openclaw/openclaw/pull/10527"
+    - id: R-F05
+      recommendation: "--ignore-scripts for plugin and hook pack npm install"
+      addresses: [T-EXEC-008]
+      status: "FIXED (PR #10528)"
+      pr: "https://github.com/openclaw/openclaw/pull/10528"
+    - id: R-F06
+      recommendation: "File permission enforcement (0o600) on WhatsApp credentials"
+      addresses: [T-ACCESS-009]
+      status: "FIXED (PR #10529)"
+      pr: "https://github.com/openclaw/openclaw/pull/10529"
+
 atlas_technique_mapping:
   - atlas_id: AML.T0006
     name: Active Scanning
@@ -846,19 +1058,19 @@ atlas_technique_mapping:
     threats: [T-EXFIL-001, T-EXFIL-002, T-EXFIL-003, T-EXFIL-004]
   - atlas_id: AML.T0010.001
     name: "Supply Chain: AI Software"
-    threats: [T-ACCESS-004, T-ACCESS-005, T-EXEC-005, T-PERSIST-001, T-PERSIST-002]
+    threats: [T-ACCESS-004, T-ACCESS-005, T-EXEC-005, T-EXEC-008, T-EXEC-009, T-PERSIST-001, T-PERSIST-002]
   - atlas_id: AML.T0081
     name: "Modify AI Agent Configuration"
     threats: [T-PERSIST-003]
   - atlas_id: AML.T0031
     name: Erode AI Model Integrity
-    threats: [T-IMPACT-001, T-IMPACT-002, T-IMPACT-003, T-IMPACT-004, T-IMPACT-005]
+    threats: [T-IMPACT-001, T-IMPACT-002, T-IMPACT-003, T-IMPACT-004, T-IMPACT-005, T-IMPACT-006]
   - atlas_id: AML.T0040
     name: AI Model Inference API Access
-    threats: [T-ACCESS-001, T-ACCESS-002, T-ACCESS-003, T-PERSIST-004, T-DISC-001, T-DISC-002, T-DISC-003, T-DISC-004]
+    threats: [T-ACCESS-001, T-ACCESS-002, T-ACCESS-003, T-ACCESS-007, T-ACCESS-008, T-ACCESS-009, T-ACCESS-010, T-PERSIST-004, T-DISC-001, T-DISC-002, T-DISC-003, T-DISC-004]
   - atlas_id: AML.T0043
     name: Craft Adversarial Data
-    threats: [T-EXEC-004, T-EVADE-001, T-EVADE-002, T-EVADE-003, T-EVADE-004]
+    threats: [T-EXEC-004, T-EXEC-007, T-EVADE-001, T-EVADE-002, T-EVADE-003, T-EVADE-004]
   - atlas_id: AML.T0051.000
     name: "LLM Prompt Injection: Direct"
     threats: [T-ACCESS-006, T-EXEC-001, T-EXEC-003, T-EXEC-006, T-PERSIST-005]
@@ -893,6 +1105,18 @@ key_security_files:
     risk_level: High
   - path: src/routing/resolve-route.ts
     purpose: Session isolation
+    risk_level: Medium
+  - path: src/gateway/openresponses-http.ts
+    purpose: OpenResponses API (input_image/input_file URL fetching)
+    risk_level: High
+  - path: src/canvas-host/a2ui.ts
+    purpose: A2UI file serving
+    risk_level: Medium
+  - path: src/plugins/install.ts
+    purpose: Plugin npm installation
+    risk_level: High
+  - path: src/web/auth-store.ts
+    purpose: WhatsApp credential storage
     risk_level: Medium
 
 glossary:
