@@ -304,7 +304,7 @@ threats:
   - id: T-PERSIST-003
     name: Agent Configuration Tampering
     tactic: Persistence
-    atlas: AML.T0010.002
+    atlas: AML.T0081
     risk: Medium
     category: persistence
     description: Attacker modifies agent configuration to persist access
@@ -847,8 +847,8 @@ atlas_technique_mapping:
   - atlas_id: AML.T0010.001
     name: "Supply Chain: AI Software"
     threats: [T-ACCESS-004, T-ACCESS-005, T-EXEC-005, T-PERSIST-001, T-PERSIST-002]
-  - atlas_id: AML.T0010.002
-    name: "Supply Chain: Data"
+  - atlas_id: AML.T0081
+    name: "Modify AI Agent Configuration"
     threats: [T-PERSIST-003]
   - atlas_id: AML.T0031
     name: Erode AI Model Integrity
